@@ -6,7 +6,9 @@ type ZoneAbbrev struct {
 	Zone  string
 }
 
-var ZoneAbbrevs = map[string]ZoneAbbrev{
+var ZoneAbbrevs = map[string]*ZoneAbbrev{
+	"UTC":  {"UTC", false, "UTC"},
+	"Z":    {"UTC", false, "UTC"},
 	"SAST": {"SAST", false, "Africa/Johannesburg"},
 	"WAT":  {"WAT", false, "Africa/Lagos"},
 	"CAT":  {"CAT", false, "Africa/Lusaka"},
