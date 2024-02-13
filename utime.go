@@ -446,6 +446,43 @@ func tokenize(s string) []string {
 
 	flush := func() {
 		s := strings.TrimRight(buf.String(), separators)
+
+		// Hueristic to split date from time. Very ugly. Find a unique separator before
+		// a time component that best splits the string in half.
+		if len(s) > 2 {
+			counts := make(map[rune]int)
+			var idxs []int
+			var totalCount int
+			for i, c := range s[1 : len(s)-1] {
+				// Do not split at or after ":"
+				if c == ':' {
+					break
+				}
+				if strings.ContainsRune(separators, c) {
+					counts[c] += 1
+					totalCount += 1
+					idxs = append(idxs, i+1)
+				}
+			}
+			if totalCount > 2 {
+				bestIdx := -1
+				bestIdxErr := float64(len(s))
+				for _, idx := range idxs {
+					if counts[rune(s[idx])] == 1 {
+						idxErr := math.Abs(float64(len(s))/2 - float64(idx))
+						if idxErr < bestIdxErr {
+							bestIdx = idx
+							bestIdxErr = idxErr
+						}
+					}
+				}
+				if bestIdx >= 0 {
+					tokens = append(tokens, s[:bestIdx], s[bestIdx+1:])
+					return
+				}
+			}
+		}
+
 		if len(s) > 0 {
 			tokens = append(tokens, s)
 		}
