@@ -79,7 +79,6 @@ const (
 	Next
 	At
 	In
-	T
 	Now
 	Today
 )
@@ -408,6 +407,7 @@ func tokenize(s string) []string {
 		Other
 	)
 
+	const separators = ":-./+'"
 	getClass := func(c rune) class {
 		if unicode.IsDigit(c) {
 			return Digit
@@ -415,7 +415,7 @@ func tokenize(s string) []string {
 		if unicode.IsLetter(c) {
 			return Letter
 		}
-		if strings.ContainsRune(":-./+'", c) {
+		if strings.ContainsRune(separators, c) {
 			return Separator
 		}
 		if unicode.IsSpace(c) {
@@ -444,18 +444,15 @@ func tokenize(s string) []string {
 	var buf strings.Builder
 
 	flush := func() {
-		s := buf.String()
-		for len(s) > 0 && s[len(s)-1] == '-' {
-			s = s[:len(s)-1]
-		}
+		s := strings.TrimRight(buf.String(), separators)
 		if len(s) > 0 {
 			tokens = append(tokens, s)
 		}
 		buf.Reset()
 	}
 
-	a := Other
-	b := Other
+	a := Space
+	b := Space
 	for _, c := range s {
 		x := getClass(c)
 		if !merge(a, b, x) {
@@ -520,6 +517,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 	}
 
 	regexpQuantityOrOffset := oneof(`[+-](?:\d\d){1,3}`)
+	regexpSignedQuantity := oneof(`[+-]\d+`)
 	regexpTime := oneof(`(\d+):(\d\d)(?::(\d\d(?:\.\d+)?))?([+-]\d\d:?\d\d)?`)
 	regexpDate := oneof(
 		`(?P<year>\d{4})-(?P<month>\d{2})-(?<day>\d{2})`,
@@ -531,6 +529,11 @@ func parse(now time.Time, s string) (time.Time, error) {
 		`(?P<daymonth>\d{2})/(?P<daymonth>\d{2})`,
 	)
 	regexpShortYear := regexp.MustCompile(`^'(\d\d)$`)
+
+	skip := map[string]bool{
+		"on": true,
+		"t":  true,
+	}
 
 	literals := map[string]any{
 		// AM/PM
@@ -589,7 +592,6 @@ func parse(now time.Time, s string) (time.Time, error) {
 		"before": Before,
 		"at":     At,
 		"in":     In,
-		"t":      T,
 		"now":    Now,
 		"today":  Today,
 		// Units
@@ -722,11 +724,20 @@ func parse(now time.Time, s string) (time.Time, error) {
 			units = append(units, int64(1), UnitDay, After, Today)
 		} else if regexpQuantityOrOffset.MatchString(token) {
 			units = append(units, QuantityOrOffset(token))
+		} else if regexpSignedQuantity.MatchString(token) {
+			var d DeltaPrefix
+			if token[0] == '-' {
+				d = Minus
+			} else {
+				d = Plus
+			}
+			n := int64(parseInt(token[1:]))
+			units = append(units, d, n)
 		} else if n, err := strconv.ParseInt(token, 10, 64); err == nil {
 			units = append(units, n)
 		} else if n, err := strconv.ParseFloat(token, 64); err == nil {
 			units = append(units, n)
-		} else {
+		} else if !skip[token] {
 			return time.Time{}, fmt.Errorf("can not parse %q", token)
 		}
 	}
@@ -838,8 +849,15 @@ func parse(now time.Time, s string) (time.Time, error) {
 		NewRule(
 			Match(IsQuantityOrOffset, IsUnit),
 			func(xs []any) []any {
-				q := parseInt(string(xs[0].(QuantityOrOffset)))
-				return []any{int64(q), xs[0]}
+				s := string(xs[0].(QuantityOrOffset))
+				// var d DeltaPrefix
+				// if s[0] == '-' {
+				// 	d = Minus
+				// } else {
+				// 	d = Plus
+				// }
+				q := int64(parseInt(s[1:]))
+				return []any{q, xs[1]}
 			},
 		),
 		NewRule(
@@ -1188,7 +1206,8 @@ func main() {
 	fmt.Println(input.Format(time.RFC3339Nano))
 	fmt.Println(input.Local().Format(time.RFC3339Nano))
 	fmt.Println(input.UTC().Format(time.RFC3339Nano))
-	fmt.Println(input.Unix())
-	fmt.Println(input.UnixNano() / 1000000)
-	fmt.Println(input.UnixNano())
+	fmt.Printf("s\t%d\n", input.Unix())
+	fmt.Printf("ms\t%d\n", input.UnixNano()/1_000_000)
+	fmt.Printf("µs\t%d\n", input.UnixNano()/1_000)
+	fmt.Printf("ns\t%d\n", input.UnixNano())
 }
