@@ -1,5 +1,7 @@
 package main
 
+//go:generate go run ./build
+
 import (
 	"errors"
 	"flag"
@@ -117,9 +119,9 @@ type QuantityOrOffset string
 type ImpliedLocation *time.Location
 
 type ZoneOffset struct {
-	Hours   int
-	Minutes int
-	Seconds int
+	Hours   int64
+	Minutes int64
+	Seconds int64
 }
 
 type Delta struct {
@@ -266,7 +268,7 @@ type ResolvedTimezone struct {
 
 func ResolveTimezone(v any) (*ResolvedTimezone, error) {
 	if v, ok := v.(ZoneOffset); ok {
-		loc := time.FixedZone("", v.Hours*3600+v.Minutes*60+v.Seconds)
+		loc := time.FixedZone("", int(v.Hours*3600+v.Minutes*60+v.Seconds))
 		return &ResolvedTimezone{loc, false, false}, nil
 	}
 	if v, ok := v.(*ZoneAbbrev); ok {
@@ -380,19 +382,18 @@ func (r *Rule) Apply(xs []any, idx int) ([]any, bool) {
 }
 
 func applyRules(xs []any, rules ...*Rule) []any {
+beginning:
 	for {
-		matched := false
 		for _, rule := range rules {
 			for i := 0; i < len(xs); i++ {
+				var matched bool
 				xs, matched = rule.Apply(xs, i)
 				if matched {
-					break
+					continue beginning
 				}
 			}
 		}
-		if !matched {
-			break
-		}
+		break
 	}
 	return xs
 }
@@ -407,7 +408,7 @@ func tokenize(s string) []string {
 		Other
 	)
 
-	const separators = ":-./+'"
+	const separators = ":-./+'_"
 	getClass := func(c rune) class {
 		if unicode.IsDigit(c) {
 			return Digit
@@ -472,8 +473,8 @@ func oneof(patterns ...string) *regexp.Regexp {
 	return regexp.MustCompile("^(?:" + strings.Join(patterns, "|") + ")$")
 }
 
-func parseInt(s string) int {
-	i, err := strconv.Atoi(s)
+func parseInt(s string) int64 {
+	i, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		panic(err)
 	}
@@ -518,6 +519,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 
 	regexpQuantityOrOffset := oneof(`[+-](?:\d\d){1,3}`)
 	regexpSignedQuantity := oneof(`[+-]\d+`)
+	regexpQuantity := oneof(`\d+`)
 	regexpTime := oneof(`(\d+):(\d\d)(?::(\d\d(?:\.\d+)?))?([+-]\d\d:?\d\d)?`)
 	regexpDate := oneof(
 		`(?P<year>\d{4})-(?P<month>\d{2})-(?<day>\d{2})`,
@@ -678,7 +680,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 				units = append(units, Day(parseInt(v)))
 			}
 
-			var daymonths []int
+			var daymonths []int64
 			for i, k := range regexpDate.SubexpNames() {
 				if k == "daymonth" && match[i] != "" {
 					daymonths = append(daymonths, parseInt(match[i]))
@@ -713,7 +715,11 @@ func parse(now time.Time, s string) (time.Time, error) {
 			units = append(units, unit)
 		} else if zone := ZoneAbbrevs[strings.ToUpper(token)]; zone != nil {
 			units = append(units, zone)
-		} else if loc, err := time.LoadLocation(token); err == nil {
+		} else if zone := Zones[token]; zone != "" {
+			loc, err := time.LoadLocation(zone)
+			if err != nil {
+				return time.Time{}, err
+			}
 			units = append(units, loc)
 		} else if token == "ago" {
 			// "<blank> ago" is the same as "<blank> before now"
@@ -731,10 +737,10 @@ func parse(now time.Time, s string) (time.Time, error) {
 			} else {
 				d = Plus
 			}
-			n := int64(parseInt(token[1:]))
+			n := parseInt(token[1:])
 			units = append(units, d, n)
-		} else if n, err := strconv.ParseInt(token, 10, 64); err == nil {
-			units = append(units, n)
+		} else if regexpQuantity.MatchString(token) {
+			units = append(units, parseInt(token))
 		} else if n, err := strconv.ParseFloat(token, 64); err == nil {
 			units = append(units, n)
 		} else if !skip[token] {
@@ -850,14 +856,14 @@ func parse(now time.Time, s string) (time.Time, error) {
 			Match(IsQuantityOrOffset, IsUnit),
 			func(xs []any) []any {
 				s := string(xs[0].(QuantityOrOffset))
-				// var d DeltaPrefix
-				// if s[0] == '-' {
-				// 	d = Minus
-				// } else {
-				// 	d = Plus
-				// }
-				q := int64(parseInt(s[1:]))
-				return []any{q, xs[1]}
+				var d DeltaPrefix
+				if s[0] == '-' {
+					d = Minus
+				} else {
+					d = Plus
+				}
+				q := parseInt(s[1:])
+				return []any{d, q, xs[1]}
 			},
 		),
 		NewRule(
@@ -865,11 +871,11 @@ func parse(now time.Time, s string) (time.Time, error) {
 			func(xs []any) []any {
 				off := string(xs[0].(QuantityOrOffset))
 				h := parseInt(off[:3])
-				m := 0
+				var m int64
 				if len(off) > 3 {
 					m = parseInt(off[3:5])
 				}
-				s := 0
+				var s int64
 				if len(off) > 5 {
 					s = parseInt(off[5:6])
 				}
