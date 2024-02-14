@@ -5,11 +5,19 @@ import (
 	"fmt"
 	"go/format"
 	"io"
+	"log"
 	"os"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
+	_ "time/tzdata"
 )
+
+func isZoneSupported(zone string) bool {
+	_, err := time.LoadLocation(zone)
+	return err == nil
+}
 
 func main() {
 	f, err := os.Open("build/tzdata.zi")
@@ -32,6 +40,10 @@ func main() {
 		}
 		if m := reZ.FindStringSubmatch(l); m != nil {
 			z := m[1]
+			if !isZoneSupported(z) {
+				log.Printf("[WARN] Omitting unsupported zone %q", z)
+				continue
+			}
 			zones = append(zones, fmt.Sprintf("%q: %q,", strings.ToLower(z), z))
 			cityIdx := strings.LastIndexByte(z, '/') + 1
 			if cityIdx > 0 {
@@ -41,6 +53,10 @@ func main() {
 		} else if m := reL.FindStringSubmatch(l); m != nil {
 			alias := strings.ToLower(m[2])
 			zone := m[1]
+			if !isZoneSupported(zone) {
+				log.Printf("[WARN] Omitting unsupported zone %q", zone)
+				continue
+			}
 			aliases[alias] = fmt.Sprintf("%q: %q,", alias, zone)
 		}
 	}

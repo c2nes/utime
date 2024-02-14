@@ -68,6 +68,19 @@ func test(t *testing.T, subject string, expected string) {
 	}
 }
 
+func testErr(t *testing.T, subject string, expected error) {
+	zero, _ := time.Parse("", "")
+	actual, err := parse(zero, subject)
+	if err == nil {
+		t.Errorf("expected error %q, actually parsed as %q; subject: %q", expected, actual, subject)
+		return
+	}
+	if err != expected {
+		t.Errorf("expected error %q, actually %q; subject: %q", expected, err, subject)
+		return
+	}
+}
+
 func TestParse2(t *testing.T) {
 	test(t, "10am on feb 3 2024", "2024-02-03T10:00:00Z")
 	test(t, "10am on. feb 3 2024", "2024-02-03T10:00:00Z")
@@ -81,6 +94,14 @@ func TestParse2(t *testing.T) {
 	test(t, "2024/02/01 10am America/New_York", "2024-02-01T10:00:00-05:00")
 	test(t, "2024/02/01 10am EST", "2024-02-01T10:00:00-05:00")
 	test(t, "2024/02/01 10am dubai", "2024-02-01T10:00:00+04:00")
+	// Ensure timezones and "at" are applied in order
+	test(t, "2024/02/01 EST at noon in utc", "2024-02-01T17:00:00+00:00")
+	test(t, "2024/02/01 EST in utc at noon", "2024-02-01T12:00:00+00:00")
+	testErr(t, "1 hour after 12:00pm at 2pm", errTimeAssertionFailure)
+	test(t, "1 hour after 1pm at 2pm", "0000-01-01T14:00:00Z")
+	test(t, "tomorrow at 2pm", "0000-01-02T14:00:00Z")
+	test(t, "1 hour after noon utc tomorrow", "0000-01-02T13:00:00Z")
+	test(t, "1 hour after 2pm at 10:00:00-0500", "0000-01-01T15:00:00Z")
 }
 
 func TestTokenize(t *testing.T) {
