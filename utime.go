@@ -3,6 +3,7 @@ package main
 //go:generate go run ./build
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +26,8 @@ var preferDDMM = flag.Bool("ddmm", false, "assume DD/MM for ambiguous dates")
 var strictDST = flag.Bool("strict-dst", false, "enforce correct use of DST timezone abbreviations")
 var debug = flag.Bool("debug", false, "debug")
 var until = flag.Bool("until", false, "print time until (or since) the resolved time")
+var layout = flag.String("format", time.RFC1123, "output format for local and target")
+var jsonOutput = flag.Bool("json", false, "output in JSON")
 
 const Year3000Epoch = 32503680000
 
@@ -96,6 +99,7 @@ const (
 	In
 	Now
 	Today
+	OrdinalSuffix
 )
 
 type DeltaSuffix int
@@ -505,7 +509,11 @@ func tokenize(s string) []string {
 	var buf strings.Builder
 
 	flush := func() {
-		s := strings.TrimRight(buf.String(), separators)
+		s := buf.String()
+		trimmed := strings.TrimRight(s, separators)
+		if trimmed != "" {
+			s = trimmed
+		}
 
 		// Hueristic to split date from time. Very ugly. Find a unique separator before
 		// a time component that best splits the string in half.
@@ -602,8 +610,8 @@ func parse(now time.Time, s string) (time.Time, error) {
 				sec:  t.Second(),
 				nsec: t.Nanosecond(),
 			},
-			ImpliedLocation(t.Location()),
 			TwentyFourHour,
+			ImpliedLocation(t.Location()),
 		}
 	}
 
@@ -695,6 +703,11 @@ func parse(now time.Time, s string) (time.Time, error) {
 		"in":     In,
 		"now":    Now,
 		"today":  Today,
+		// Ordinal suffixes
+		"st": OrdinalSuffix,
+		"nd": OrdinalSuffix,
+		"rd": OrdinalSuffix,
+		"th": OrdinalSuffix,
 		// Units
 		"nanosecond":   UnitNanosecond,
 		"nanoseconds":  UnitNanosecond,
@@ -813,6 +826,8 @@ func parse(now time.Time, s string) (time.Time, error) {
 			units = append(units, Year(yr))
 		} else if unit := literals[token]; unit != nil {
 			units = append(units, unit)
+		} else if token == "utc" {
+			units = append(units, time.UTC)
 		} else if zone := ZoneAbbrevs[strings.ToUpper(token)]; zone != nil {
 			units = append(units, zone)
 		} else if zone := Zones[token]; zone != "" {
@@ -928,6 +943,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 				return []any{lt}, nil
 			},
 		),
+		// at <time> might be either setting or asserting the time
 		NewRule(
 			Match(Is(At), IsLocalTime, IsTimezone),
 			func(xs []any) ([]any, error) {
@@ -945,6 +961,14 @@ func parse(now time.Time, s string) (time.Time, error) {
 				return []any{
 					MaybeLocalTimeAssertion{lt, nil},
 				}, nil
+			},
+		),
+		// Numbers before ordinal suffixes (e.g. 1st, 2nd, etc.) are days
+		NewRule(
+			Match(IsInt64, Is(OrdinalSuffix)),
+			func(xs []any) ([]any, error) {
+				day := xs[0].(int64)
+				return []any{Day(day)}, nil
 			},
 		),
 		// Infer days and years based on proximity to days/months
@@ -1021,10 +1045,10 @@ func parse(now time.Time, s string) (time.Time, error) {
 		),
 		// Remaining quantity that is plausibly a year
 		NewRule(
-			Match(IsDateTimeComponent, CouldBeYear),
+			Match(CouldBeYear),
 			func(xs []any) ([]any, error) {
-				q := xs[1].(int64)
-				return []any{xs[0], Year(q)}, nil
+				q := xs[0].(int64)
+				return []any{Year(q)}, nil
 			},
 		),
 		// Remaining quantities are treated as unix timestamps
@@ -1094,7 +1118,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 		NewRule(Match(Is(Today)), func(xs []any) ([]any, error) {
 			return explodeDate(now), nil
 		}),
-		NewRule(Match(Is(Today)), func(xs []any) ([]any, error) {
+		NewRule(Match(Is(Now)), func(xs []any) ([]any, error) {
 			return explodeTimestamp(now), nil
 		}))
 
@@ -1176,8 +1200,11 @@ func parse(now time.Time, s string) (time.Time, error) {
 	}
 
 	year := now.Year()
+	yearIsSet := false
 	month := now.Month()
+	monthIsSet := false
 	day := now.Day()
+	dayIsSet := false
 	hour := now.Hour()
 	min := now.Minute()
 	sec := int64(now.Second())
@@ -1187,12 +1214,15 @@ func parse(now time.Time, s string) (time.Time, error) {
 	for _, unit := range units {
 		if v, ok := unit.(Year); ok {
 			year = int(v)
+			yearIsSet = true
 		}
 		if v, ok := unit.(Month); ok {
 			month = time.Month(v)
+			monthIsSet = true
 		}
 		if v, ok := unit.(Day); ok {
 			day = int(v)
+			dayIsSet = true
 		}
 		if v, ok := unit.(LocalTime); ok {
 			hour = v.hour
@@ -1201,6 +1231,24 @@ func parse(now time.Time, s string) (time.Time, error) {
 			nsec = int64(v.nsec)
 			timeIsSet = true
 		}
+	}
+
+	if yearIsSet && (!monthIsSet && !dayIsSet) {
+		// Year only. Set to Jan 1.
+		month = time.January
+		day = 1
+	} else if monthIsSet && !dayIsSet {
+		// Month, but no day. Set to the 1st.
+		day = 1
+	}
+
+	// If any date component is specified, but no time is given
+	// then default time to midnight.
+	if !timeIsSet && (yearIsSet || monthIsSet || dayIsSet) {
+		hour = 0
+		min = 0
+		sec = 0
+		nsec = 0
 	}
 
 	// TODO: Handle ambiguous times at DST boundaries when an hour occurs twice
@@ -1330,14 +1378,47 @@ func main() {
 		return
 	}
 
-	//layout := time.RFC3339Nano + "\tMon MST"
-	layout := time.RFC1123
+	var locationString string
+	if input.Location() != time.Local && input.Location() != time.UTC {
+		locationString = input.Location().String()
+	}
 
-	fmt.Println(input.Format(layout), input.Location())
-	fmt.Println(input.Local().Format(layout))
-	fmt.Println(input.UTC().Format(time.RFC3339Nano))
-	fmt.Printf("s\t%d\n", input.Unix())
-	fmt.Printf("ms\t%d\n", input.UnixNano()/1_000_000)
-	fmt.Printf("µs\t%d\n", input.UnixNano()/1_000)
-	fmt.Printf("ns\t%d\n", input.UnixNano())
+	output := input.Format(*layout)
+	local := input.Local().Format(*layout)
+	utc := input.UTC().Format(time.RFC3339Nano)
+	unix := input.Unix()
+	unixMillis := input.UnixNano() / 1_000_000
+	unixMicros := input.UnixNano() / 1_000
+	unixNanos := input.UnixNano()
+
+	type jsonOut struct {
+		Output     string
+		Local      string
+		UTC        string
+		Unix       int64
+		UnixMillis int64
+		UnixMicros int64
+		UnixNanos  int64
+		Location   string
+	}
+
+	if *jsonOutput {
+		out := jsonOut{output, local, utc, unix, unixMillis, unixMicros, unixNanos, locationString}
+		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	if locationString != "" {
+		fmt.Println(output, locationString)
+	} else {
+		fmt.Println(output)
+	}
+	fmt.Println(local)
+	fmt.Println(utc)
+	fmt.Printf("s\t%d\n", unix)
+	fmt.Printf("ms\t%d\n", unixMillis)
+	fmt.Printf("µs\t%d\n", unixMicros)
+	fmt.Printf("ns\t%d\n", unixNanos)
 }
