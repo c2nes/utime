@@ -102,6 +102,8 @@ func TestParse2(t *testing.T) {
 	test(t, "tomorrow at 2pm", "0000-01-02T14:00:00Z")
 	test(t, "1 hour after noon utc tomorrow", "0000-01-02T13:00:00Z")
 	test(t, "1 hour after 2pm at 10:00:00-0500", "0000-01-01T15:00:00Z")
+	test(t, "now", "0000-01-01T00:00:00Z")
+	test(t, "today", "0000-01-01T00:00:00Z")
 }
 
 func TestTokenize(t *testing.T) {

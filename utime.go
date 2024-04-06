@@ -863,8 +863,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 		}
 	}
 
-	var err error
-	units, err = applyRules(units,
+	rules := []*Rule{
 		// Delta with prefix
 		NewRule(
 			Match(IsDeltaPrefix, IsQuantity, IsUnit),
@@ -1081,7 +1080,10 @@ func parse(now time.Time, s string) (time.Time, error) {
 				return []any{OutputZone{xs[1]}}, nil
 			},
 		),
-	)
+	}
+
+	var err error
+	units, err = applyRules(units, rules...)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -1122,6 +1124,12 @@ func parse(now time.Time, s string) (time.Time, error) {
 			return explodeTimestamp(now), nil
 		}))
 
+	// Apply rules once more to process expanded today/now references.
+	units, err = applyRules(units, rules...)
+	if err != nil {
+		return time.Time{}, err
+	}
+
 	// "at" resets the time component. Remove all time components before the last "at".
 	merged := make([]any, 0, len(units))
 	for _, unit := range units {
@@ -1144,7 +1152,11 @@ func parse(now time.Time, s string) (time.Time, error) {
 	if *debug {
 		var out []string
 		for _, unit := range units {
-			out = append(out, fmt.Sprintf("%T(%#v)", unit, unit))
+			if l, ok := unit.(ImpliedLocation); ok {
+				out = append(out, fmt.Sprintf("%T(%s)", unit, (*time.Location)(l)))
+			} else {
+				out = append(out, fmt.Sprintf("%T(%#v)", unit, unit))
+			}
 		}
 		fmt.Println(strings.Join(out, ","))
 	}
