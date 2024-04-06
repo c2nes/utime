@@ -1392,14 +1392,14 @@ func main() {
 	unixNanos := input.UnixNano()
 
 	type jsonOut struct {
-		Output     string
-		Local      string
-		UTC        string
-		Unix       int64
-		UnixMillis int64
-		UnixMicros int64
-		UnixNanos  int64
-		Location   string
+		Output     string `json:"output"`
+		Local      string `json:"local"`
+		UTC        string `json:"utc"`
+		Unix       int64  `json:"unix"`
+		UnixMillis int64  `json:"unix_millis"`
+		UnixMicros int64  `json:"unix_micros"`
+		UnixNanos  int64  `json:"unix_nanos"`
+		Location   string `json:"location,omitempty"`
 	}
 
 	if *jsonOutput {
