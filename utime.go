@@ -25,7 +25,6 @@ var preferMMDD = flag.Bool("mmdd", false, "assume MM/DD for ambiguous dates")
 var preferDDMM = flag.Bool("ddmm", false, "assume DD/MM for ambiguous dates")
 var strictDST = flag.Bool("strict-dst", false, "enforce correct use of DST timezone abbreviations")
 var debug = flag.Bool("debug", false, "debug")
-var until = flag.Bool("until", false, "print time until (or since) the resolved time")
 var layout = flag.String("format", time.RFC1123, "output format for local and target")
 var jsonOutput = flag.Bool("json", false, "output in JSON")
 
@@ -119,7 +118,9 @@ const (
 type Unit int
 
 const (
-	UnitNanosecond Unit = iota
+	None Unit = iota
+	Mixed
+	UnitNanosecond
 	UnitMicrosecond
 	UnitMillisecond
 	UnitSecond
@@ -131,6 +132,90 @@ const (
 	UnitYear
 )
 
+func (u Unit) FormatDuration(start, end time.Time) string {
+	d := end.Sub(start)
+	switch u {
+	case Mixed:
+		sign := ""
+		if start.After(end) {
+			start, end = end, start
+			sign = "-"
+		}
+		y, m, d := 0, 0, 0
+		for start.AddDate(y+1, m, d).Before(end) {
+			y++
+		}
+		for start.AddDate(y, m+1, d).Before(end) {
+			m++
+		}
+		for start.AddDate(y, m, d+1).Before(end) {
+			d++
+		}
+		rem := end.Sub(start.AddDate(y, m, d))
+		hr := int(rem.Hours())
+		rem -= time.Duration(hr) * time.Hour
+		min := int(rem.Minutes())
+		rem -= time.Duration(min) * time.Minute
+		sec := rem.Seconds()
+		parts := []struct {
+			amt  int
+			unit string
+		}{
+			{y, "year"},
+			{m, "month"},
+			{d, "day"},
+			{hr, "hour"},
+			{min, "minute"},
+		}
+		var out []string
+		for _, part := range parts {
+			if part.amt != 0 {
+				if part.amt > 1 {
+					out = append(out, fmt.Sprintf("%d %ss", part.amt, part.unit))
+				} else {
+					out = append(out, fmt.Sprintf("%d %s", part.amt, part.unit))
+				}
+			}
+		}
+		if sec > 0 || len(out) == 0 {
+			if sec == 1.0 {
+				out = append(out, "1 second")
+			} else {
+				out = append(out, fmt.Sprintf("%.9g seconds", sec))
+			}
+		}
+		return sign + strings.Join(out, " ")
+	case UnitNanosecond:
+		return fmt.Sprintf("%d ns", d.Nanoseconds())
+	case UnitMicrosecond:
+		return fmt.Sprintf("%d µs", d.Microseconds())
+	case UnitMillisecond:
+		return fmt.Sprintf("%d ms", d.Milliseconds())
+	case UnitSecond:
+		return fmt.Sprintf("%.1f sec", d.Seconds())
+	case UnitMinute:
+		return fmt.Sprintf("%.1f min", d.Minutes())
+	case UnitHour:
+		return fmt.Sprintf("%.1f hours", d.Hours())
+	case UnitDay:
+		return fmt.Sprintf("%.1f days", d.Hours()/24)
+	case UnitWeek:
+		return fmt.Sprintf("%.1f weeks", d.Hours()/24/7)
+	case UnitMonth:
+		return fmt.Sprintf("%.1f months", d.Hours()/24/365*12)
+	case UnitYear:
+		return fmt.Sprintf("%.1f years", d.Hours()/24/365)
+	}
+	panic("unsupported unit")
+}
+
+type DurationMeasure int
+
+const (
+	Since DurationMeasure = -1
+	Until DurationMeasure = 1
+)
+
 type QuantityOrOffset string
 
 type ImpliedLocation *time.Location
@@ -139,6 +224,11 @@ type ZoneOffset struct {
 	Hours   int64
 	Minutes int64
 	Seconds int64
+}
+
+type OutputMeasure struct {
+	Unit      Unit
+	Direction int
 }
 
 type Delta struct {
@@ -310,9 +400,25 @@ func IsQuantityOrOffset(v any) bool {
 	return ok
 }
 
+func IsDurationMeasure(v any) bool {
+	_, ok := v.(DurationMeasure)
+	return ok
+}
+
+func IsOutputMeasure(v any) bool {
+	_, ok := v.(OutputMeasure)
+	return ok
+}
+
 func Is(want any) func(v any) bool {
 	return func(v any) bool {
 		return v == want
+	}
+}
+
+func Not(p func(any) bool) func(any) bool {
+	return func(v any) bool {
+		return !p(v)
 	}
 }
 
@@ -594,7 +700,15 @@ func parseFloat(s string) float64 {
 	return f
 }
 
-func parse(now time.Time, s string) (time.Time, error) {
+type Result struct {
+	Time time.Time
+
+	DeltaBase      time.Time
+	DeltaUnit      Unit
+	DeltaDirection int
+}
+
+func parse(now time.Time, s string) (*Result, error) {
 	tokens := tokenize(strings.ToLower(s))
 
 	var units []any
@@ -743,6 +857,9 @@ func parse(now time.Time, s string) (time.Time, error) {
 		"mn":  UnitMonth,
 		"y":   UnitYear,
 		"yr":  UnitYear,
+		// Duration measurements
+		"since": Since,
+		"until": Until,
 	}
 
 	if *debug {
@@ -810,7 +927,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 				} else if *preferDDMM {
 					units = append(units, Day(daymonths[0]), Month(daymonths[1]))
 				} else {
-					return time.Time{}, errors.New("ambiguous day/month")
+					return nil, errors.New("ambiguous day/month")
 				}
 			} else if len(daymonths) != 0 {
 				panic("exactly 0 or 2 daymonths needed")
@@ -833,7 +950,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 		} else if zone := Zones[token]; zone != "" {
 			loc, err := time.LoadLocation(zone)
 			if err != nil {
-				return time.Time{}, err
+				return nil, err
 			}
 			units = append(units, loc)
 		} else if token == "ago" {
@@ -859,7 +976,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 		} else if n, err := strconv.ParseFloat(token, 64); err == nil {
 			units = append(units, n)
 		} else if !skip[token] {
-			return time.Time{}, fmt.Errorf("can not parse %q", token)
+			return nil, fmt.Errorf("can not parse %q", token)
 		}
 	}
 
@@ -1080,12 +1197,27 @@ func parse(now time.Time, s string) (time.Time, error) {
 				return []any{OutputZone{xs[1]}}, nil
 			},
 		),
+		NewRule(
+			Match(IsUnit, IsDurationMeasure),
+			func(xs []any) ([]any, error) {
+				unit := xs[0].(Unit)
+				direction := (int)(xs[1].(DurationMeasure))
+				return []any{OutputMeasure{unit, direction}}, nil
+			},
+		),
+		NewRule(
+			Match(IsDurationMeasure),
+			func(xs []any) ([]any, error) {
+				direction := (int)(xs[0].(DurationMeasure))
+				return []any{OutputMeasure{Mixed, direction}}, nil
+			},
+		),
 	}
 
 	var err error
 	units, err = applyRules(units, rules...)
 	if err != nil {
-		return time.Time{}, err
+		return nil, err
 	}
 
 	// Resolve the source timezone before we expand "now" and "today" references
@@ -1101,7 +1233,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 			var err error
 			sourceTimezone, err = ResolveTimezone(unit)
 			if err != nil {
-				return time.Time{}, nil
+				return nil, nil
 			}
 			sourceTimezoneIsExplicit = true
 		}
@@ -1109,7 +1241,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 			var err error
 			sourceTimezone, err = ResolveTimezone((*time.Location)(zone))
 			if err != nil {
-				return time.Time{}, nil
+				return nil, nil
 			}
 		}
 	}
@@ -1127,7 +1259,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 	// Apply rules once more to process expanded today/now references.
 	units, err = applyRules(units, rules...)
 	if err != nil {
-		return time.Time{}, err
+		return nil, err
 	}
 
 	// "at" resets the time component. Remove all time components before the last "at".
@@ -1164,17 +1296,17 @@ func parse(now time.Time, s string) (time.Time, error) {
 	// Check for bare quantities and other errors
 	for _, unit := range units {
 		if _, ok := unit.(Unit); ok {
-			return time.Time{}, errors.New("bare unit")
+			return nil, errors.New("bare unit")
 		}
 		if _, ok := unit.(DeltaPrefix); ok {
-			return time.Time{}, errors.New("unexpected +/-")
+			return nil, errors.New("unexpected +/-")
 		}
 		if _, ok := unit.(DeltaSuffix); ok {
-			return time.Time{}, errors.New("unexpected before/after")
+			return nil, errors.New("unexpected before/after")
 		}
 		if v, ok := unit.(*Delta); ok {
 			if v.Direction == 0 {
-				return time.Time{}, errors.New("delta without direction (missing after/before?)")
+				return nil, errors.New("delta without direction (missing after/before?)")
 			}
 		}
 	}
@@ -1190,25 +1322,28 @@ func parse(now time.Time, s string) (time.Time, error) {
 		return n
 	}
 	if count(units, IsLocalTime) > 1 {
-		return time.Time{}, errors.New("multiple times specified")
+		return nil, errors.New("multiple times specified")
 	}
 	if count(units, IsDay) > 1 {
-		return time.Time{}, errors.New("multiple days specified")
+		return nil, errors.New("multiple days specified")
 	}
 	if count(units, IsMonth) > 1 {
-		return time.Time{}, errors.New("multiple months specified")
+		return nil, errors.New("multiple months specified")
 	}
 	if count(units, IsYear) > 1 {
-		return time.Time{}, errors.New("multiple years specified")
+		return nil, errors.New("multiple years specified")
 	}
 	if count(units, IsTimeOfDay) > 0 {
-		return time.Time{}, errors.New("multiple times of day specified")
+		return nil, errors.New("multiple times of day specified")
 	}
 	if count(units, IsDayOfWeek) > 1 {
-		return time.Time{}, errors.New("multiple days of the week specified")
+		return nil, errors.New("multiple days of the week specified")
 	}
 	if count(units, IsTimezone) > 1 {
-		return time.Time{}, errors.New("multiple timezones specified")
+		return nil, errors.New("multiple timezones specified")
+	}
+	if count(units, IsOutputMeasure) > 1 {
+		return nil, errors.New("multiple uses of until/since")
 	}
 
 	year := now.Year()
@@ -1271,7 +1406,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 	for _, unit := range units {
 		if v, ok := unit.(DayOfWeek); ok {
 			if result.Weekday() != time.Weekday(v) {
-				return time.Time{}, errors.New("day of week does not match")
+				return nil, errors.New("day of week does not match")
 			}
 		}
 	}
@@ -1280,7 +1415,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 	if *strictDST &&
 		sourceTimezone.dstEnforce &&
 		result.IsDST() != sourceTimezone.dstExpected {
-		return time.Time{}, errDSTMismatch
+		return nil, errDSTMismatch
 	}
 
 	// Apply deltas
@@ -1292,7 +1427,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 		if v, ok := unit.(OutputZone); ok {
 			zone, err := ResolveTimezone(v.Zone)
 			if err != nil {
-				return time.Time{}, nil
+				return nil, nil
 			}
 
 			if timeIsSet {
@@ -1309,7 +1444,7 @@ func parse(now time.Time, s string) (time.Time, error) {
 			if *strictDST &&
 				zone.dstEnforce &&
 				zone.dstExpected != result.IsDST() {
-				return time.Time{}, errDSTMismatch
+				return nil, errDSTMismatch
 			}
 		}
 
@@ -1320,18 +1455,18 @@ func parse(now time.Time, s string) (time.Time, error) {
 				if v.tz != nil {
 					tz, err := ResolveTimezone(v.tz)
 					if err != nil {
-						return time.Time{}, err
+						return nil, err
 					}
 					inTZ := result.In(tz.loc)
 					if *strictDST && tz.dstEnforce && result.IsDST() != tz.dstExpected {
-						return time.Time{}, errDSTMismatch
+						return nil, errDSTMismatch
 					}
 					hour, min, sec = inTZ.Clock()
 				} else {
 					hour, min, sec = result.Clock()
 				}
 				if hour != v.t.hour || min != v.t.min || sec != v.t.sec {
-					return time.Time{}, errTimeAssertionFailure
+					return nil, errTimeAssertionFailure
 				}
 			} else {
 				// Set time
@@ -1339,11 +1474,11 @@ func parse(now time.Time, s string) (time.Time, error) {
 				if v.tz != nil {
 					tz, err := ResolveTimezone(v.tz)
 					if err != nil {
-						return time.Time{}, err
+						return nil, err
 					}
 					result = time.Date(year, month, day, v.t.hour, v.t.min, v.t.sec, v.t.nsec, tz.loc)
 					if *strictDST && tz.dstEnforce && result.IsDST() != tz.dstExpected {
-						return time.Time{}, errDSTMismatch
+						return nil, errDSTMismatch
 					}
 				} else {
 					result = time.Date(year, month, day, v.t.hour, v.t.min, v.t.sec, v.t.nsec, result.Location())
@@ -1353,14 +1488,28 @@ func parse(now time.Time, s string) (time.Time, error) {
 		}
 	}
 
-	return result, nil
+	deltaDir := 1
+	deltaUnit := None
+	for _, unit := range units {
+		if m, ok := unit.(OutputMeasure); ok {
+			deltaDir = m.Direction
+			deltaUnit = m.Unit
+		}
+	}
+	return &Result{
+		Time:           result,
+		DeltaBase:      now,
+		DeltaUnit:      deltaUnit,
+		DeltaDirection: deltaDir,
+	}, nil
 }
 
 func main() {
+	textPattern := regexp.MustCompile(`^([^-]|-$|-\d)`)
 	var args []string
 	var text []string
 	for _, arg := range os.Args[1:] {
-		if len(text) > 0 || !strings.HasPrefix(arg, "-") {
+		if len(text) > 0 || textPattern.MatchString(arg) {
 			text = append(text, arg)
 		} else {
 			args = append(args, arg)
@@ -1368,28 +1517,24 @@ func main() {
 	}
 	flag.CommandLine.Parse(args)
 
-	var input time.Time
+	var res *Result
 	now := time.Now()
 
 	if len(text) > 0 {
 		s := strings.Join(text, " ")
 
 		var err error
-		input, err = parse(now, s)
+		res, err = parse(now, s)
 
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err.Error())
 			os.Exit(1)
 		}
 	} else {
-		input = now
+		res = &Result{Time: now}
 	}
 
-	if *until {
-		fmt.Println(input.Sub(now))
-		return
-	}
-
+	var input = res.Time
 	var locationString string
 	if input.Location() != time.Local && input.Location() != time.UTC {
 		locationString = input.Location().String()
@@ -1402,6 +1547,15 @@ func main() {
 	unixMillis := input.UnixNano() / 1_000_000
 	unixMicros := input.UnixNano() / 1_000
 	unixNanos := input.UnixNano()
+	deltaOutput := ""
+
+	if res.DeltaUnit != None {
+		start, end := res.DeltaBase, res.Time
+		if res.DeltaDirection < 0 {
+			start, end = end, start
+		}
+		deltaOutput = res.DeltaUnit.FormatDuration(start, end)
+	}
 
 	type jsonOut struct {
 		Output     string `json:"output"`
@@ -1412,13 +1566,29 @@ func main() {
 		UnixMicros int64  `json:"unix_micros"`
 		UnixNanos  int64  `json:"unix_nanos"`
 		Location   string `json:"location,omitempty"`
+		Delta      string `json:"delta,omitempty"`
 	}
 
 	if *jsonOutput {
-		out := jsonOut{output, local, utc, unix, unixMillis, unixMicros, unixNanos, locationString}
+		out := jsonOut{
+			Output:     output,
+			Local:      local,
+			UTC:        utc,
+			Unix:       unix,
+			UnixMillis: unixMillis,
+			UnixMicros: unixMicros,
+			UnixNanos:  unixNanos,
+			Location:   locationString,
+			Delta:      deltaOutput,
+		}
 		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 			log.Fatal(err)
 		}
+		return
+	}
+
+	if deltaOutput != "" {
+		fmt.Println(deltaOutput)
 		return
 	}
 
