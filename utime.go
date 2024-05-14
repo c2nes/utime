@@ -652,7 +652,7 @@ func tokenize(s string) []string {
 				}
 				if bestIdx >= 0 {
 					tokens = append(tokens, s[:bestIdx], s[bestIdx+1:])
-					return
+					s = ""
 				}
 			}
 		}
