@@ -99,13 +99,16 @@ func singleZoneCountries() (map[string]string, error) {
 		}
 	}
 
+	// Hard code some countries with a clear "default" timezone
+	zonesByCC["CN"] = []string{"Asia/Shanghai"}
+
 	// When countries have multiple timezones we compare the zones at various
-	// points in time between 1970 and 2020. If they agree at all instants
+	// points in time between 2010 and 2024. If they agree at all instants
 	// then we consider the zones to be equivalent and we select the first
 	// as the canonical zone.
 	var trialInstants []time.Time
-	trialInstant := time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)
-	for trialInstant.Year() < 2020 {
+	trialInstant := time.Date(2010, time.January, 1, 0, 0, 0, 0, time.UTC)
+	for trialInstant.Year() < 2024 {
 		trialInstants = append(trialInstants, trialInstant)
 		trialInstant = trialInstant.Add(time.Hour * 23)
 	}
