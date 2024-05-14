@@ -43,11 +43,11 @@ func TestParse(t *testing.T) {
 			t.Errorf("failed to parse %q: %v", s, err)
 			continue
 		}
-		if expected.Second() != actual.Second() {
+		if expected.Second() != actual.Time.Second() {
 			t.Errorf("S: %v (expected) != %v (actual); %q", expected, actual, s)
 		}
-		if expected.Nanosecond() != actual.Nanosecond() {
-			t.Errorf("N: %v (expected) != %v (actual); %q", expected.Nanosecond(), actual.Nanosecond(), s)
+		if expected.Nanosecond() != actual.Time.Nanosecond() {
+			t.Errorf("N: %v (expected) != %v (actual); %q", expected.Nanosecond(), actual.Time.Nanosecond(), s)
 		}
 	}
 }
@@ -63,8 +63,8 @@ func test(t *testing.T, subject string, expected string) {
 		t.Errorf("failed to parse %q: %v", subject, err)
 		return
 	}
-	if !actual.Equal(expectedTime) {
-		t.Errorf("%s (expected) != %s (actual); subject: %q", expectedTime, actual, subject)
+	if !actual.Time.Equal(expectedTime) {
+		t.Errorf("%s (expected) != %s (actual); subject: %q", expectedTime, actual.Time, subject)
 	}
 }
 
