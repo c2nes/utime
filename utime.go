@@ -54,6 +54,13 @@ const (
 	Dec
 )
 
+func (m Month) String() string {
+	return []string{
+		"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+		"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+	}[int(m)-1]
+}
+
 type DayOfWeek int
 
 const (
@@ -92,9 +99,7 @@ const (
 type Keyword int
 
 const (
-	Last Keyword = iota
-	Next
-	At
+	At Keyword = iota
 	In
 	Now
 	Today
@@ -108,12 +113,35 @@ const (
 	Before DeltaSuffix = -1
 )
 
+func (d DeltaSuffix) ToDirection() Direction {
+	if d == After {
+		return Forwards
+	} else {
+		return Backwards
+	}
+}
+
 type DeltaPrefix int
 
 const (
 	Plus  DeltaPrefix = 1
 	Minus DeltaPrefix = -1
 )
+
+func (d DeltaPrefix) ToDirection() Direction {
+	if d == Plus {
+		return Forwards
+	} else {
+		return Backwards
+	}
+}
+
+func (d DeltaPrefix) String() string {
+	if int(d) > 0 {
+		return "+"
+	}
+	return "-"
+}
 
 type Unit int
 
@@ -131,6 +159,13 @@ const (
 	UnitMonth
 	UnitYear
 )
+
+func (u Unit) String() string {
+	return []string{
+		"none", "mixed", "ns", "us", "ms", "sec", "min",
+		"hour", "day", "week", "month", "year",
+	}[int(u)]
+}
 
 func (u Unit) FormatDuration(start, end time.Time) string {
 	d := end.Sub(start)
@@ -231,6 +266,10 @@ type OutputMeasure struct {
 	Direction int
 }
 
+type Transform interface {
+	Apply(time.Time) time.Time
+}
+
 type Delta struct {
 	Unit      Unit
 	Quantity  int64
@@ -290,6 +329,187 @@ func (d *Delta) Apply(t time.Time) time.Time {
 	}
 
 	panic("unsupported unit")
+}
+
+type Truncate Unit
+
+func (t Truncate) String() string {
+	return Unit(t).String()
+}
+
+func (t Truncate) Apply(v time.Time) time.Time {
+	date := func(y int, m time.Month, d int) time.Time {
+		return time.Date(y, m, d, 0, 0, 0, 0, v.Location())
+	}
+	u := Unit(t)
+	if u == UnitYear {
+		return date(v.Year(), time.January, 1)
+	}
+	if u == UnitMonth {
+		return date(v.Year(), v.Month(), 1)
+	}
+	if u == UnitWeek {
+		return date(v.Year(), v.Month(), v.Day()).AddDate(0, 0, -int(v.Weekday()))
+	}
+	if u == UnitDay {
+		return date(v.Year(), v.Month(), v.Day())
+	}
+	panic("unimplemented")
+}
+
+type Direction int
+
+const (
+	Forwards Direction = iota
+	Backwards
+	// Forward, but exclude "this" week/month/year
+	Next
+	// Backwards, but exclude "this" week/month/year
+	Last
+	// Forwards or backwards.
+	Nearest
+	// As in, "this week", "this tuesday", "this month", etc.
+	This
+)
+
+func (d Direction) String() string {
+	return []string{
+		"forwards", "backards", "next", "last", "nearest", "this",
+	}[int(d)]
+}
+
+func IsDirection(v any) bool {
+	_, ok := v.(Direction)
+	return ok
+}
+
+// Search for a date with a given month, day, and/or day of week.
+type Search struct {
+	Year      Year
+	Month     Month
+	Day       Day
+	DayOfWeek DayOfWeek
+
+	// Skip this many initial matches.
+	Skip int64
+
+	// Direction in which to perform the search.
+	// +1, forward
+	// -1, backwards
+	//  0, nearest
+	// -2, limit search to "this" week/month/year
+	Direction Direction
+
+	// If true, the search keyword is a suffix, indicating
+	// that additional calendar components may only appear
+	// before the search keyword.
+	Suffix bool
+}
+
+func NewSearch(direction Direction, skip int64) *Search {
+	return &Search{
+		Year:      -1,
+		Month:     -1,
+		Day:       -1,
+		DayOfWeek: -1,
+		Skip:      skip,
+		Direction: direction,
+	}
+}
+
+func (s *Search) SetCalendar(c any) {
+	if IsYear(c) {
+		s.Year = c.(Year)
+	} else if IsMonth(c) {
+		s.Month = c.(Month)
+	} else if IsDay(c) {
+		s.Day = c.(Day)
+	} else if IsDayOfWeek(c) {
+		s.DayOfWeek = c.(DayOfWeek)
+	} else {
+		panic("not a calendar unit")
+	}
+}
+
+func (d *Search) Apply(t time.Time) time.Time {
+	week := func(tx time.Time) int {
+		yr, wk := tx.ISOWeek()
+		return yr*100 + wk
+	}
+	matchEnclosing := func(a, b int) bool {
+		if d.Direction == Next || d.Direction == Last {
+			return a != b
+		}
+		if d.Direction == This {
+			return a == b
+		}
+		return true
+	}
+	match := func(tx time.Time) bool {
+		// Check search components
+		if d.Year >= 0 && Year(tx.Year()) != d.Year {
+			return false
+		}
+		if d.Month >= Jan && Month(tx.Month()) != d.Month {
+			return false
+		}
+		if d.Day >= 1 && Day(tx.Day()) != d.Day {
+			return false
+		}
+		if d.DayOfWeek >= Sun && DayOfWeek(tx.Weekday()) != d.DayOfWeek {
+			return false
+		}
+		// Apply rules for enclosing time period. "This" should
+		// require the enclosing time period match. "Next"/"Last"
+		// should require the enclosing time period increment/decrement.
+		if d.Month >= Jan && !matchEnclosing(t.Year(), tx.Year()) {
+			return false
+		}
+		if d.DayOfWeek >= Sun && !matchEnclosing(week(t), week(tx)) {
+			return false
+		}
+		return true
+	}
+
+	var truncate Unit
+	if d.Day >= 1 {
+		truncate = None
+	} else if d.DayOfWeek >= Sun {
+		truncate = UnitDay
+	} else if d.Month >= Jan {
+		truncate = UnitMonth
+	}
+
+	skip := d.Skip
+	var lastMatch time.Time
+	for i := 0; i < 365*10000; i++ {
+		var off int
+		if d.Direction == Forwards || d.Direction == Next {
+			off = i
+		} else if d.Direction == Backwards || d.Direction == Last {
+			off = -i
+		} else if i%2 == 0 {
+			off = i / 2
+		} else {
+			off = -i / 2
+		}
+
+		tx := t.AddDate(0, 0, off)
+		if truncate > None {
+			tx = Truncate(truncate).Apply(tx)
+		}
+		if match(tx) {
+			if tx.Equal(lastMatch) {
+				continue
+			}
+			if skip <= 0 {
+				return tx
+			}
+			skip--
+			lastMatch = tx
+		}
+	}
+	return time.Time{}
 }
 
 type OutputZone struct {
@@ -410,6 +630,21 @@ func IsOutputMeasure(v any) bool {
 	return ok
 }
 
+func IsSearch(v any) bool {
+	_, ok := v.(*Search)
+	return ok
+}
+
+func IsSuffixedSearch(v any) bool {
+	s, ok := v.(*Search)
+	return ok && s.Suffix
+}
+
+func IsPrefixedSearch(v any) bool {
+	s, ok := v.(*Search)
+	return ok && !s.Suffix
+}
+
 func Is(want any) func(v any) bool {
 	return func(v any) bool {
 		return v == want
@@ -419,6 +654,17 @@ func Is(want any) func(v any) bool {
 func Not(p func(any) bool) func(any) bool {
 	return func(v any) bool {
 		return !p(v)
+	}
+}
+
+func Or(p ...func(any) bool) func(any) bool {
+	return func(a any) bool {
+		for _, px := range p {
+			if px(a) {
+				return true
+			}
+		}
+		return false
 	}
 }
 
@@ -446,6 +692,20 @@ func ResolveTimezone(v any) (*ResolvedTimezone, error) {
 		return &ResolvedTimezone{loc, false, false}, nil
 	}
 	return nil, errors.New("not a timezone")
+}
+
+func DebugUnits(units []any) string {
+	var out []string
+	for _, unit := range units {
+		if l, ok := unit.(ImpliedLocation); ok {
+			out = append(out, fmt.Sprintf("%T(%s)", unit, (*time.Location)(l)))
+		} else if s, ok := unit.(fmt.Stringer); ok {
+			out = append(out, fmt.Sprintf("%T(%s)", unit, s))
+		} else {
+			out = append(out, fmt.Sprintf("%T(%#v)", unit, unit))
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // AM, PM
@@ -559,6 +819,9 @@ beginning:
 					return nil, err
 				}
 				if matched {
+					if *debug {
+						log.Println("->", DebugUnits(xs))
+					}
 					continue beginning
 				}
 			}
@@ -810,6 +1073,7 @@ func parse(now time.Time, s string) (*Result, error) {
 		"+":      Plus,
 		"minus":  Minus,
 		"-":      Minus,
+		"this":   This,
 		"after":  After,
 		"from":   After,
 		"before": Before,
@@ -1042,6 +1306,72 @@ func parse(now time.Time, s string) (*Result, error) {
 				}, nil
 			},
 		),
+		NewRule(
+			Match(IsDeltaPrefix, IsInt64, Or(IsMonth, IsDay, IsDayOfWeek)),
+			func(xs []any) ([]any, error) {
+				d := xs[0].(DeltaPrefix).ToDirection()
+				s := NewSearch(d, xs[1].(int64)-1)
+				s.SetCalendar(xs[2])
+				return []any{s}, nil
+			},
+		),
+		NewRule(
+			Match(Or(IsMonth, IsDay, IsDayOfWeek), IsDeltaSuffix),
+			func(xs []any) ([]any, error) {
+				d := xs[1].(DeltaSuffix).ToDirection()
+				s := NewSearch(d, 0)
+				s.SetCalendar(xs[0])
+				return []any{s}, nil
+			},
+		),
+		NewRule(
+			Match(IsPrefixedSearch, Or(IsMonth, IsInt64, IsDay, IsDayOfWeek)),
+			func(xs []any) ([]any, error) {
+				s := xs[0].(*Search)
+				if v, ok := xs[1].(int64); ok {
+					xs[1] = Day(v)
+				}
+				s.SetCalendar(xs[1])
+				return []any{s}, nil
+			},
+		),
+		NewRule(
+			Match(Or(IsMonth, IsDay, IsDayOfWeek), IsSuffixedSearch),
+			func(xs []any) ([]any, error) {
+				s := xs[1].(*Search)
+				s.SetCalendar(xs[0])
+				return []any{s}, nil
+			},
+		),
+		NewRule(
+			Match(IsDirection, Or(IsMonth, IsDay, IsDayOfWeek)),
+			func(xs []any) ([]any, error) {
+				s := NewSearch(xs[0].(Direction), 0)
+				s.SetCalendar(xs[1])
+				return []any{s}, nil
+			},
+		),
+		NewRule(
+			Match(IsDirection, IsUnit),
+			func(xs []any) ([]any, error) {
+				d := xs[0].(Direction)
+				u := xs[1].(Unit)
+				if d == This {
+					return []any{Truncate(u)}, nil
+				}
+				delta := &Delta{
+					Unit:     u,
+					Quantity: 1,
+				}
+				if d == Next {
+					delta.Direction = 1
+				}
+				if d == Last {
+					delta.Direction = -1
+				}
+				return []any{delta, Truncate(u)}, nil
+			},
+		),
 		// Apply time of day indicator
 		NewRule(
 			Match(IsLocalTime, IsTimeOfDay),
@@ -1139,10 +1469,13 @@ func parse(now time.Time, s string) (*Result, error) {
 				return []any{d, q, xs[1]}, nil
 			},
 		),
+		// QuantityOrOffset following a date/time component
+		// will assumed to be offsets if they do not preceed
+		// a unit.
 		NewRule(
-			Match(IsQuantityOrOffset),
+			Match(IsDateTimeComponent, IsQuantityOrOffset),
 			func(xs []any) ([]any, error) {
-				off := string(xs[0].(QuantityOrOffset))
+				off := string(xs[1].(QuantityOrOffset))
 				h := parseInt(off[:3])
 				var m int64
 				if len(off) > 3 {
@@ -1156,7 +1489,21 @@ func parse(now time.Time, s string) (*Result, error) {
 					m *= -1
 					s *= -1
 				}
-				return []any{ZoneOffset{h, m, s}}, nil
+				return []any{xs[0], ZoneOffset{h, m, s}}, nil
+			},
+		),
+		NewRule(
+			Match(IsQuantityOrOffset),
+			func(xs []any) ([]any, error) {
+				s := string(xs[0].(QuantityOrOffset))
+				var d DeltaPrefix
+				if s[0] == '-' {
+					d = Minus
+				} else {
+					d = Plus
+				}
+				q := parseInt(s[1:])
+				return []any{d, q}, nil
 			},
 		),
 		// Remaining quantity that is plausibly a year
@@ -1212,6 +1559,10 @@ func parse(now time.Time, s string) (*Result, error) {
 				return []any{OutputMeasure{Mixed, direction}}, nil
 			},
 		),
+	}
+
+	if *debug {
+		log.Println(DebugUnits(units))
 	}
 
 	var err error
@@ -1282,15 +1633,7 @@ func parse(now time.Time, s string) (*Result, error) {
 
 	// Debug logging
 	if *debug {
-		var out []string
-		for _, unit := range units {
-			if l, ok := unit.(ImpliedLocation); ok {
-				out = append(out, fmt.Sprintf("%T(%s)", unit, (*time.Location)(l)))
-			} else {
-				out = append(out, fmt.Sprintf("%T(%#v)", unit, unit))
-			}
-		}
-		fmt.Println(strings.Join(out, ","))
+		log.Println("->", DebugUnits(units))
 	}
 
 	// Check for bare quantities and other errors
@@ -1303,11 +1646,6 @@ func parse(now time.Time, s string) (*Result, error) {
 		}
 		if _, ok := unit.(DeltaSuffix); ok {
 			return nil, errors.New("unexpected before/after")
-		}
-		if v, ok := unit.(*Delta); ok {
-			if v.Direction == 0 {
-				return nil, errors.New("delta without direction (missing after/before?)")
-			}
 		}
 	}
 
@@ -1357,6 +1695,8 @@ func parse(now time.Time, s string) (*Result, error) {
 	sec := int64(now.Second())
 	nsec := int64(now.Nanosecond())
 	timeIsSet := false
+	dayOfWeek := now.Weekday()
+	dayOfWeekIsSet := false
 
 	for _, unit := range units {
 		if v, ok := unit.(Year); ok {
@@ -1378,15 +1718,22 @@ func parse(now time.Time, s string) (*Result, error) {
 			nsec = int64(v.nsec)
 			timeIsSet = true
 		}
+		if v, ok := unit.(DayOfWeek); ok {
+			dayOfWeek = time.Weekday(v)
+			dayOfWeekIsSet = true
+		}
 	}
 
 	if yearIsSet && (!monthIsSet && !dayIsSet) {
 		// Year only. Set to Jan 1.
 		month = time.January
+		monthIsSet = true
 		day = 1
+		dayIsSet = true
 	} else if monthIsSet && !dayIsSet {
 		// Month, but no day. Set to the 1st.
 		day = 1
+		dayIsSet = true
 	}
 
 	// If any date component is specified, but no time is given
@@ -1398,17 +1745,74 @@ func parse(now time.Time, s string) (*Result, error) {
 		nsec = 0
 	}
 
+	// If the day, month, or year is not set then we'll search forwards
+	// and backwards from `now` to find the closest match. Measurements
+	// (i.e. "since" / "from") will change this behavior so we instead
+	// look backwards or forwards only.
+	if !dayIsSet || !monthIsSet || !yearIsSet {
+		search := NewSearch(Nearest, 0)
+		if yearIsSet {
+			search.SetCalendar(Year(year))
+		}
+		if monthIsSet {
+			search.SetCalendar(Month(month))
+		}
+		if dayIsSet {
+			search.SetCalendar(Day(day))
+		}
+		if dayOfWeekIsSet {
+			search.SetCalendar(DayOfWeek(dayOfWeek))
+		}
+		for _, unit := range units {
+			// days until <...> should always look forward
+			// days since <...> should always look backwards
+			if m, ok := unit.(OutputMeasure); ok {
+				if m.Direction > 0 {
+					search.Direction = Forwards
+				}
+				if m.Direction < 0 {
+					search.Direction = Backwards
+				}
+			}
+		}
+		if match := search.Apply(now); !match.IsZero() {
+			if !yearIsSet {
+				year = match.Year()
+			}
+			if !monthIsSet {
+				month = match.Month()
+			}
+			if !dayIsSet {
+				day = match.Day()
+			}
+			if !dayOfWeekIsSet {
+				dayOfWeek = match.Weekday()
+			}
+		}
+	}
+
 	// TODO: Handle ambiguous times at DST boundaries when an hour occurs twice
 	result := time.Date(year, month, day, hour, min, int(sec), int(nsec), sourceTimezone.loc)
 
-	// We now have a fully specified base time. If a day of week was
-	// given, make sure it is correct.
-	for _, unit := range units {
-		if v, ok := unit.(DayOfWeek); ok {
-			if result.Weekday() != time.Weekday(v) {
-				return nil, errors.New("day of week does not match")
-			}
+	// Verify that any asserted calendar components are as expected
+	if (dayOfWeekIsSet && dayOfWeek != result.Weekday()) ||
+		(dayIsSet && day != result.Day()) ||
+		(monthIsSet && month != result.Month()) ||
+		(yearIsSet && year != result.Year()) {
+		var expected []string
+		if dayOfWeekIsSet {
+			expected = append(expected, dayOfWeek.String())
 		}
+		if dayIsSet {
+			expected = append(expected, fmt.Sprintf("%d", day))
+		}
+		if monthIsSet {
+			expected = append(expected, month.String())
+		}
+		if yearIsSet {
+			expected = append(expected, fmt.Sprintf("%d", year))
+		}
+		return nil, fmt.Errorf("no such date: %s", strings.Join(expected, " "))
 	}
 
 	// Make sure any implied DST is correct
@@ -1418,10 +1822,17 @@ func parse(now time.Time, s string) (*Result, error) {
 		return nil, errDSTMismatch
 	}
 
-	// Apply deltas
+	if *debug {
+		log.Println("result:", result)
+	}
+
+	// Apply transformations
 	for _, unit := range units {
-		if v, ok := unit.(*Delta); ok {
+		if v, ok := unit.(Transform); ok {
 			result = v.Apply(result)
+			if *debug {
+				log.Println("->", result)
+			}
 		}
 
 		if v, ok := unit.(OutputZone); ok {
