@@ -82,6 +82,8 @@ func testErr(t *testing.T, subject string, expected error) {
 }
 
 func TestParse2(t *testing.T) {
+	*preferDDMM = true
+
 	test(t, "10am on feb 3 2024", "2024-02-03T10:00:00Z")
 	test(t, "10am on. feb 3 2024", "2024-02-03T10:00:00Z")
 	test(t, "feb 3 2024 at 10am", "2024-02-03T10:00:00Z")
@@ -140,6 +142,12 @@ func TestParse2(t *testing.T) {
 	test(t, "+10 feb 15", "2009-02-15T00:00:00Z")
 	test(t, "+5 feb 29", "2016-02-29T00:00:00Z")
 	test(t, "-2 feb 29", "1992-02-29T00:00:00Z")
+	// Date test (preferDDMM is enabled above)
+	test(t, "2003/02/01", "2003-02-01T00:00:00Z")
+	test(t, "01/02/2003", "2003-02-01T00:00:00Z")
+	test(t, "1/02/2003", "2003-02-01T00:00:00Z")
+	test(t, "01/2/2003", "2003-02-01T00:00:00Z")
+	test(t, "1/2/2003", "2003-02-01T00:00:00Z")
 }
 
 func TestTokenize(t *testing.T) {

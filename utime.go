@@ -1007,9 +1007,9 @@ func parse(now time.Time, s string) (*Result, error) {
 	regexpTime := oneof(`(\d+):(\d\d)(?::(\d\d(?:\.\d+)?))?([+-]\d\d:?\d\d)?`)
 	regexpDate := oneof(
 		`(?P<year>\d{4})-(?P<month>\d{2})-(?<day>\d{2})`,
-		`(?P<year>\d{4})/(?P<month>\d{2})/(?<day>\d{2})`,
+		`(?P<year>\d{4})/(?P<month>\d{1,2})/(?<day>\d{1,2})`,
 		`(?P<day>\d{2})\.(?P<month>\d{2})\.(?<year>\d{4})`,
-		`(?P<daymonth>\d{2})/(?P<daymonth>\d{2})/(?<year>\d{4})`,
+		`(?P<daymonth>\d{1,2})/(?P<daymonth>\d{1,2})/(?<year>\d{4})`,
 		`(?P<daymonth>[0-3]\d)(?P<daymonth>[0-3]\d)(?P<year>(?:19|20)\d{2})`,
 		`(?P<year>(?:19|20)\d{2})(?P<month>[0-1]\d)(?<day>[0-3]\d)`,
 		`(?P<daymonth>\d{2})/(?P<daymonth>\d{2})`,
